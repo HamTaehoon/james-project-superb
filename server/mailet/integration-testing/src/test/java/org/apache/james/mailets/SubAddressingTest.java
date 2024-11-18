@@ -27,6 +27,7 @@ import static org.apache.james.mailets.configuration.Constants.FROM2;
 import static org.apache.james.mailets.configuration.Constants.LOCALHOST_IP;
 import static org.apache.james.mailets.configuration.Constants.PASSWORD;
 import static org.apache.james.mailets.configuration.Constants.RECIPIENT;
+import static org.apache.james.mailets.configuration.Constants.RECIPIENT2;
 import static org.apache.james.mailets.configuration.Constants.awaitAtMostOneMinute;
 
 import java.io.File;
@@ -35,10 +36,18 @@ import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.security.spec.InvalidKeySpecException;
 
+import org.apache.james.core.Username;
+import org.apache.james.mailbox.model.MailboxACL;
 import org.apache.james.mailbox.model.MailboxConstants;
+import org.apache.james.mailbox.model.MailboxId;
+import org.apache.james.mailbox.model.MailboxPath;
+import org.apache.james.mailbox.model.MultimailboxesSearchQuery;
+import org.apache.james.mailbox.model.SearchQuery;
 import org.apache.james.mailets.configuration.CommonProcessors;
 import org.apache.james.mailets.configuration.MailetConfiguration;
 import org.apache.james.mailets.configuration.ProcessorConfiguration;
+import org.apache.james.modules.ACLProbeImpl;
+import org.apache.james.modules.MailboxProbeImpl;
 import org.apache.james.modules.protocols.ImapGuiceProbe;
 import org.apache.james.modules.protocols.SmtpGuiceProbe;
 import org.apache.james.probe.DataProbe;
@@ -55,6 +64,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 class SubAddressingTest {
     private static final String TARGETED_MAILBOX = "any";
+    private static final String TARGETED_MAILBOX_LOWER = TARGETED_MAILBOX;
+    private static final String TARGETED_MAILBOX_UPPER = "ANY";
+    private static final String TARGETED_MAILBOX_REQUIRING_ENCODING = "Dossier d'été";
+    private static final String TARGETED_MAILBOX_ENCODED = "Dossier%20d%27%C3%A9t%C3%A9";
 
     @RegisterExtension
     public TestIMAPClient testIMAPClient = new TestIMAPClient();
@@ -78,6 +91,7 @@ class SubAddressingTest {
         DataProbe dataProbe = jamesServer.getProbe(DataProbeImpl.class);
         dataProbe.addDomain(DEFAULT_DOMAIN);
         dataProbe.addUser(RECIPIENT, PASSWORD);
+        dataProbe.addUser(RECIPIENT2, PASSWORD);
         dataProbe.addUser(FROM, PASSWORD);
         dataProbe.addUser(FROM2, PASSWORD);
 
@@ -100,8 +114,124 @@ class SubAddressingTest {
 
         // do not create mailbox
 
-        sendSubAddressedMail();
+        sendSubAddressedMail(TARGETED_MAILBOX);
         awaitSubAddressedMail(MailboxConstants.INBOX);
+    }
+
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInINBOXWhenSpecifiedFolderExistsForAnotherUser(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailbox for recipient 1
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX + " " + "anyone" + " p");
+
+        // send to recipient 2
+        messageSender.connect(LOCALHOST_IP, jamesServer.getProbe(SmtpGuiceProbe.class).getSmtpPort())
+                .authenticate(FROM, PASSWORD)
+                .sendMessage(FROM, "recipient2+" + TARGETED_MAILBOX + "@" + DEFAULT_DOMAIN);
+
+        testIMAPClient
+                .connect(LOCALHOST_IP, jamesServer.getProbe(ImapGuiceProbe.class).getImapPort())
+                .login(RECIPIENT2, PASSWORD)
+                .select(MailboxConstants.INBOX)
+                .awaitMessage(awaitAtMostOneMinute);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInSpecifiedFolderWhenItExistsInUpperCase(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailbox
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_UPPER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_UPPER + " " + "anyone" + " p");
+
+        sendSubAddressedMail(TARGETED_MAILBOX_LOWER);
+        awaitSubAddressedMail(TARGETED_MAILBOX_UPPER);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInSpecifiedFolderWhenItExistsInLowerCase(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailbox
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_LOWER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_LOWER + " " + "anyone" + " p");
+
+        sendSubAddressedMail(TARGETED_MAILBOX_UPPER);
+        awaitSubAddressedMail(TARGETED_MAILBOX_LOWER);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInSpecifiedFolderWithCorrectLowerCaseWhenSeveralCasesExist(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailboxes
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_LOWER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_LOWER + " " + "anyone" + " p");
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_UPPER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_UPPER + " " + "anyone" + " p");
+
+        sendSubAddressedMail(TARGETED_MAILBOX_LOWER);
+        awaitSubAddressedMail(TARGETED_MAILBOX_LOWER);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInSpecifiedFolderWithCorrectUpperCaseWhenSeveralCasesExist(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailboxes
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_LOWER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_LOWER + " " + "anyone" + " p");
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_UPPER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_UPPER + " " + "anyone" + " p");
+
+        sendSubAddressedMail(TARGETED_MAILBOX_UPPER);
+        awaitSubAddressedMail(TARGETED_MAILBOX_UPPER);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInINBOXWhenSpecifiedFolderExistsWithCorrectCaseButNoRightAndOtherCaseButRight(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        // create mailbox with incorrect case and give posting right
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_LOWER);
+        testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX_LOWER + " " + "anyone" + " p");
+
+        // create mailbox with correct case but don't give posting right
+        testIMAPClient.sendCommand("CREATE " + TARGETED_MAILBOX_UPPER);
+
+        sendSubAddressedMail(TARGETED_MAILBOX_UPPER);
+        awaitSubAddressedMail(MailboxConstants.INBOX);
+    }
+
+    @Test
+    void subAddressedEmailShouldBeDeliveredInSpecifiedFolderWhenRequiringEncoding(@TempDir File temporaryFolder) throws Exception {
+        setup(temporaryFolder);
+
+        MailboxId targetMailboxId = jamesServer.getProbe(MailboxProbeImpl.class).createMailbox(MailboxPath.forUser(Username.of(RECIPIENT), TARGETED_MAILBOX_REQUIRING_ENCODING));
+
+        //give posting rights
+        jamesServer.getProbe(ACLProbeImpl.class).executeCommand(
+                targetMailboxId,
+                Username.of(RECIPIENT),
+                MailboxACL.command()
+                        .key(MailboxACL.ANYONE_KEY)
+                        .rights(MailboxACL.Right.Post)
+                        .asAddition());
+
+        sendSubAddressedMail(TARGETED_MAILBOX_ENCODED);
+
+        int loadLimit = 1;
+        awaitAtMostOneMinute.until(() -> jamesServer.getProbe(MailboxProbeImpl.class)
+                .searchMessage(MultimailboxesSearchQuery
+                        .from(SearchQuery.builder().build())
+                        .inMailboxes(targetMailboxId)
+                        .build(),
+                    RECIPIENT,
+                    loadLimit)
+                .size() == 1);
     }
 
     @Test
@@ -114,7 +244,7 @@ class SubAddressingTest {
         // do not give posting rights
         testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX + " " + "anyone" + " -p");
 
-        sendSubAddressedMail();
+        sendSubAddressedMail(TARGETED_MAILBOX);
         awaitSubAddressedMail(MailboxConstants.INBOX);
     }
 
@@ -127,14 +257,14 @@ class SubAddressingTest {
         // give posting rights for anyone
         testIMAPClient.sendCommand("SETACL " + TARGETED_MAILBOX + " " + "anyone" + " +p");
 
-        sendSubAddressedMail();
+        sendSubAddressedMail(TARGETED_MAILBOX);
         awaitSubAddressedMail(TARGETED_MAILBOX);
     }
 
-    private void sendSubAddressedMail() throws IOException, NoSuchAlgorithmException, InvalidKeyException, InvalidKeySpecException {
+    private void sendSubAddressedMail(String targetMailbox) throws IOException, NoSuchAlgorithmException, InvalidKeyException, InvalidKeySpecException {
         messageSender.connect(LOCALHOST_IP, jamesServer.getProbe(SmtpGuiceProbe.class).getSmtpPort())
             .authenticate(FROM, PASSWORD)
-            .sendMessage(FROM, "user2+" + TARGETED_MAILBOX + "@" + DEFAULT_DOMAIN);
+            .sendMessage(FROM,"recipient+" + targetMailbox + "@" + DEFAULT_DOMAIN);
     }
 
     private void awaitSubAddressedMail(String expectedMailbox) throws IOException {

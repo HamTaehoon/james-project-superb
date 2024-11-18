@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
@@ -71,6 +72,7 @@ import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
+@Singleton
 public class S3BlobStoreDAO implements BlobStoreDAO {
 
     private static class FileBackedOutputStreamByteSource extends ByteSource {
@@ -112,8 +114,7 @@ public class S3BlobStoreDAO implements BlobStoreDAO {
     private final BlobId.Factory blobIdFactory;
 
     @Inject
-    @Singleton
-    S3BlobStoreDAO(S3ClientFactory s3ClientFactory,
+    public S3BlobStoreDAO(S3ClientFactory s3ClientFactory,
                    S3BlobStoreConfiguration configuration,
                    BlobId.Factory blobIdFactory) {
         this.configuration = configuration;
@@ -313,7 +314,8 @@ public class S3BlobStoreDAO implements BlobStoreDAO {
                 .map(BlobId::asString)
                 .map(id -> ObjectIdentifier.builder().key(id).build())
                 .collect(ImmutableList.toImmutableList()))
-            .then();
+            .then()
+            .onErrorResume(NoSuchBucketException.class, e -> Mono.empty());
     }
 
     @Override
@@ -325,10 +327,10 @@ public class S3BlobStoreDAO implements BlobStoreDAO {
 
     private Mono<Void> deleteResolvedBucket(BucketName bucketName) {
         return emptyBucket(bucketName)
-            .onErrorResume(t -> Mono.just(bucketName))
+            .onErrorResume(throwable -> throwable instanceof CompletionException && throwable.getCause() instanceof NoSuchBucketException, t -> Mono.just(bucketName))
             .flatMap(ignore -> Mono.fromFuture(() ->
                 client.deleteBucket(builder -> builder.bucket(bucketName.asString()))))
-            .onErrorResume(t -> Mono.empty())
+            .onErrorResume(NoSuchBucketException.class, t -> Mono.empty())
             .then()
             .publishOn(Schedulers.parallel());
     }
